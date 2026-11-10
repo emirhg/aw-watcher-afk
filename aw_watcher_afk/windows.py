@@ -35,6 +35,12 @@ def is_screen_locked() -> bool:
     return False
 
 
+def elapsed_clock() -> float:
+    # Placeholder: a constant never looks like a pause, so gap detection is off
+    # on Windows until the sleep-inclusive clock is wired up.
+    return 0.0
+
+
 def seconds_since_last_input() -> float:
     tick_count = _getTickCount64()
     last_input_tick = _getLastInputTick()  # 32-bit DWORD from GetLastInputInfo

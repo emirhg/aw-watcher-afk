@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime
-from time import sleep
+from time import CLOCK_BOOTTIME, clock_gettime, sleep
 
 from .listeners import GamepadListener, KeyboardListener, MouseListener
 
@@ -111,6 +111,15 @@ def seconds_since_last_input():
 def is_screen_locked() -> bool:
     # TODO: Linux implementation (e.g. logind LockedHint / DBus screensaver)
     return False
+
+
+def elapsed_clock() -> float:
+    """Seconds since boot, including time spent suspended.
+
+    CLOCK_MONOTONIC stops during suspend on Linux; CLOCK_BOOTTIME does not.
+    Differences between samples reveal that the process was paused.
+    """
+    return clock_gettime(CLOCK_BOOTTIME)
 
 
 if __name__ == "__main__":
