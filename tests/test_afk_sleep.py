@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from aw_watcher_afk import windows
 from aw_watcher_afk.afk import AFKWatcher
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -94,6 +95,8 @@ class FakeWorld:
 
 
 class SleepGapTests(unittest.TestCase):
+    use_windows_clock = False
+
     def run_steps(self, steps):
         world = FakeWorld(steps)
         watcher = object.__new__(AFKWatcher)
@@ -109,9 +112,22 @@ class SleepGapTests(unittest.TestCase):
             stack.enter_context(
                 patch("aw_watcher_afk.afk.seconds_since_last_input", new=world.idle)
             )
-            stack.enter_context(
-                patch("aw_watcher_afk.afk.elapsed_clock", new=world.clock)
-            )
+            if self.use_windows_clock:
+                # The real Windows conversion runs; only the GetTickCount64
+                # call is faked, from the same simulated time.
+                stack.enter_context(
+                    patch("aw_watcher_afk.afk.elapsed_clock", new=windows.elapsed_clock)
+                )
+                stack.enter_context(
+                    patch(
+                        "aw_watcher_afk.windows._getTickCount64",
+                        new=lambda: 10**9 + round(world.clock() * 1000),
+                    )
+                )
+            else:
+                stack.enter_context(
+                    patch("aw_watcher_afk.afk.elapsed_clock", new=world.clock)
+                )
             stack.enter_context(
                 patch("aw_watcher_afk.afk.is_screen_locked", new=lambda: False)
             )
@@ -176,6 +192,18 @@ class SleepGapTests(unittest.TestCase):
             [c.args[0] for c in without],
         )
         self.assertEqual(len(with_jitter), len(without))
+
+
+class WindowsClockSleepTests(SleepGapTests):
+    """Same scenarios, with the Windows elapsed_clock() conversion in the loop."""
+
+    use_windows_clock = True
+
+
+class WindowsElapsedClockTests(unittest.TestCase):
+    def test_elapsed_clock_converts_gettickcount64_ms_to_seconds(self):
+        with patch("aw_watcher_afk.windows._getTickCount64", return_value=12345):
+            self.assertEqual(windows.elapsed_clock(), 12.345)
 
 
 class UnixClockTests(unittest.TestCase):

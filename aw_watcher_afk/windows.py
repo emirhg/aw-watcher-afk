@@ -36,9 +36,13 @@ def is_screen_locked() -> bool:
 
 
 def elapsed_clock() -> float:
-    # Placeholder: a constant never looks like a pause, so gap detection is off
-    # on Windows until the sleep-inclusive clock is wired up.
-    return 0.0
+    """Seconds since boot, including time spent in sleep and hibernation.
+
+    GetTickCount64 includes sleep (Microsoft: Windows time functions), unlike
+    QueryUnbiasedInterruptTime, whose behavior under Modern Standby is not
+    documented. A jump between samples therefore means this process was paused.
+    """
+    return _getTickCount64() / 1000
 
 
 def seconds_since_last_input() -> float:
