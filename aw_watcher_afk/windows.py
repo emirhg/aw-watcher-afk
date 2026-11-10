@@ -35,6 +35,16 @@ def is_screen_locked() -> bool:
     return False
 
 
+def elapsed_clock() -> float:
+    """Seconds since boot, including time spent in sleep and hibernation.
+
+    GetTickCount64 includes sleep (Microsoft: Windows time functions), unlike
+    QueryUnbiasedInterruptTime, whose behavior under Modern Standby is not
+    documented. A jump between samples therefore means this process was paused.
+    """
+    return _getTickCount64() / 1000
+
+
 def seconds_since_last_input() -> float:
     tick_count = _getTickCount64()
     last_input_tick = _getLastInputTick()  # 32-bit DWORD from GetLastInputInfo

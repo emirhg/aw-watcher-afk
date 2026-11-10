@@ -3,7 +3,7 @@ import os
 import platform
 from datetime import datetime, timedelta, timezone
 from time import sleep
-from typing import Optional
+from typing import Optional, Tuple
 
 from aw_client import ActivityWatchClient
 from aw_core.models import Event
@@ -14,19 +14,22 @@ system = platform.system()
 
 if system == "Windows":
     # noreorder
-    from .windows import seconds_since_last_input, is_screen_locked  # fmt: skip
+    from .windows import seconds_since_last_input, is_screen_locked, elapsed_clock  # fmt: skip
 elif system == "Darwin":
     # noreorder
-    from .macos import seconds_since_last_input, is_screen_locked  # fmt: skip
+    from .macos import seconds_since_last_input, is_screen_locked, elapsed_clock  # fmt: skip
 elif system == "Linux":
     # noreorder
-    from .unix import seconds_since_last_input, is_screen_locked  # fmt: skip
+    from .unix import seconds_since_last_input, is_screen_locked, elapsed_clock  # fmt: skip
 else:
     raise Exception(f"Unsupported platform: {system}")
 
 
 logger = logging.getLogger(__name__)
 td1ms = timedelta(milliseconds=1)
+# A gap between two samples longer than this many poll intervals means this
+# process was paused (suspend, hibernate, or a stall), not that a poll was slow.
+SLEEP_GAP_FACTOR = 3
 
 
 class Settings:
@@ -56,8 +59,16 @@ class AFKWatcher:
         # Store initial parent PID for orphan detection
         self._initial_ppid = os.getppid()
 
-    def ping(self, afk: bool, timestamp: datetime, duration: float = 0):
+    def ping(
+        self,
+        afk: bool,
+        timestamp: datetime,
+        duration: float = 0,
+        reason: Optional[str] = None,
+    ):
         data = {"status": "afk" if afk else "not-afk"}
+        if reason is not None:
+            data["reason"] = reason
         e = Event(timestamp=timestamp, duration=duration, data=data)
         pulsetime = self.settings.timeout + self.settings.poll_time
         self.client.heartbeat(self.bucketname, e, pulsetime=pulsetime, queued=True)
@@ -82,6 +93,8 @@ class AFKWatcher:
         # of AFK). After an unlock without HID input this is later than
         # last_input, which still predates the lock.
         not_afk_start: Optional[datetime] = None
+        # (time, sleep-inclusive clock) of the previous sample, for gap detection
+        prev_sample: Optional[Tuple[datetime, float]] = None
         while True:
             try:
                 if system in ["Darwin", "Linux"] and os.getppid() != self._initial_ppid:
@@ -92,6 +105,17 @@ class AFKWatcher:
                     break
 
                 now = datetime.now(timezone.utc)
+                # The sleep-inclusive clock advances while suspended. If it moved
+                # far more than one poll interval, this process was paused, so the
+                # gap since the previous sample has no heartbeats.
+                clock_now = elapsed_clock()
+                gap_start: Optional[datetime] = None
+                if prev_sample is not None:
+                    prev_now, prev_clock = prev_sample
+                    elapsed = clock_now - prev_clock
+                    if elapsed > SLEEP_GAP_FACTOR * self.settings.poll_time:
+                        gap_start = prev_now
+                prev_sample = (now, clock_now)
                 try:
                     seconds_since_input = seconds_since_last_input()
                 except OSError:
@@ -104,6 +128,28 @@ class AFKWatcher:
                     sleep(self.settings.poll_time)
                     continue
                 locked = is_screen_locked()
+                if gap_start is not None:
+                    logger.info(
+                        f"Pause of {(now - gap_start).total_seconds():.0f}s detected "
+                        f"(from {gap_start.isoformat()})"
+                    )
+                    # The pause is its own AFK event tagged reason=sleep. Close
+                    # the not-afk period at the last sample first, if there is one.
+                    # The previous AFK event already ends at gap_start + 1ms, so
+                    # the tagged event starts right after it and never overlaps.
+                    if not afk:
+                        self.ping(afk, timestamp=gap_start)
+                    self.ping(
+                        True,
+                        timestamp=gap_start + td1ms,
+                        duration=(now - gap_start).total_seconds(),
+                        reason="sleep",
+                    )
+                    afk = True
+                    # Later AFK heartbeats are plain. Starting them at `now`
+                    # keeps them out of the tagged event (its data differs).
+                    afk_start = now
+                    not_afk_start = None
                 last_input = now - timedelta(seconds=seconds_since_input)
                 # An event starting before the not-afk event it follows cannot
                 # merge into it and is stored separately (see aw-watcher-afk#61).

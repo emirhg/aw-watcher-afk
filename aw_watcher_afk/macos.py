@@ -19,6 +19,12 @@ def is_screen_locked() -> bool:
     return bool(session.get("CGSSessionScreenIsLocked", False))
 
 
+def elapsed_clock() -> float:
+    # Placeholder: a constant never looks like a pause, so gap detection is off
+    # on macOS until a sleep-inclusive clock is chosen for it.
+    return 0.0
+
+
 def seconds_since_last_input() -> float:
     return CGEventSourceSecondsSinceLastEventType(
         kCGEventSourceStateHIDSystemState, kCGAnyInputEventType
