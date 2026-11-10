@@ -14,7 +14,12 @@ POLL_TIME = 5
 TIMEOUT = 180
 # ping() passes timeout + poll_time as the heartbeat pulsetime.
 PULSETIME = TIMEOUT + POLL_TIME
-TD1MS = timedelta(milliseconds=1)
+TOLERANCE = timedelta(milliseconds=10)
+
+
+def at(seconds):
+    """Simulated time, in seconds after NOW."""
+    return NOW + timedelta(seconds=seconds)
 
 
 class BucketModel:
@@ -43,16 +48,23 @@ class BucketModel:
                     return
         self.events.append({"start": start, "end": end, "data": data})
 
-    def intervals(self, status):
-        return [
-            (e["start"], e["end"]) for e in self.events if e["data"]["status"] == status
-        ]
+    def afk_events(self):
+        return sorted(
+            (e for e in self.events if e["data"]["status"] == "afk"),
+            key=lambda e: e["start"],
+        )
+
+    def sleep_events(self):
+        return [e for e in self.events if e["data"].get("reason") == "sleep"]
 
 
 def replay(ping_calls):
     bucket = BucketModel()
     for c in ping_calls:
         data = {"status": "afk" if c.args[0] else "not-afk"}
+        reason = c.kwargs.get("reason")
+        if reason is not None:
+            data["reason"] = reason
         bucket.heartbeat(
             data,
             c.kwargs["timestamp"],
@@ -136,24 +148,39 @@ class SleepGapTests(unittest.TestCase):
             watcher.heartbeat_loop()
         return ping.call_args_list
 
-    def assert_interval(self, actual, start, end):
-        self.assertEqual(len(actual), 1, f"expected one AFK interval, got {actual}")
-        s, e = actual[0]
+    def assert_close(self, actual, expected):
         self.assertLessEqual(
-            abs((s - (NOW + timedelta(seconds=start))).total_seconds()), 0.01
+            abs(actual - expected), TOLERANCE, f"{actual} != {expected}"
         )
-        self.assertLessEqual(
-            abs((e - (NOW + timedelta(seconds=end))).total_seconds()), 0.01
-        )
+
+    def assert_afk_contiguous(self, bucket, start, end):
+        """AFK events cover [start, end] back to back: no gap, no overlap."""
+        events = bucket.afk_events()
+        self.assertTrue(events, "no AFK events recorded")
+        self.assert_close(events[0]["start"], at(start))
+        self.assert_close(events[-1]["end"], at(end))
+        for prev, nxt in zip(events, events[1:]):
+            self.assertLessEqual(
+                abs((nxt["start"] - prev["end"]).total_seconds()),
+                TOLERANCE.total_seconds(),
+                f"AFK events not contiguous: {prev} then {nxt}",
+            )
+
+    def assert_one_sleep_event(self, bucket, start, end):
+        sleeps = bucket.sleep_events()
+        self.assertEqual(len(sleeps), 1, f"expected one reason=sleep event: {sleeps}")
+        self.assert_close(sleeps[0]["start"], at(start))
+        self.assert_close(sleeps[0]["end"], at(end))
 
     def test_sleep_while_active_user_returns_at_resume(self):
         # Active, then the machine sleeps 600s between samples at t=10 and t=615.
-        # The gap must be AFK from the last sample (t=10), not from the resume.
+        # The pause is AFK from the last sample (t=10), not from the resume.
         steps = [(True, 0), (False, 0), (False, 0), (True, 600), (False, 0)]
         bucket = replay(self.run_steps(steps))
 
         self.assertEqual(bucket.out_of_order, 0)
-        self.assert_interval(bucket.intervals("afk"), start=10, end=615)
+        self.assert_one_sleep_event(bucket, start=10, end=615)
+        self.assert_afk_contiguous(bucket, start=10, end=615)
 
     def test_sleep_then_still_away_stays_afk_until_input(self):
         steps = [
@@ -168,19 +195,19 @@ class SleepGapTests(unittest.TestCase):
         bucket = replay(self.run_steps(steps))
 
         self.assertEqual(bucket.out_of_order, 0)
-        # Input at t=625 ends the AFK period at that input.
-        self.assert_interval(bucket.intervals("afk"), start=10, end=625)
+        self.assert_one_sleep_event(bucket, start=10, end=615)
+        # Plain AFK continues after the pause until input at t=625.
+        self.assert_afk_contiguous(bucket, start=10, end=625)
 
-    def test_sleep_while_already_afk_extends_the_afk_event(self):
+    def test_sleep_while_already_afk_is_split_out(self):
         # Idle past the 180s timeout (AFK from t=0), then a 600s sleep, then input.
+        # The sleep is tagged even though the user was already away.
         steps = [(True, 0)] + [(False, 0)] * 40 + [(False, 600), (True, 0)]
         bucket = replay(self.run_steps(steps))
 
         self.assertEqual(bucket.out_of_order, 0)
-        afk = bucket.intervals("afk")
-        self.assertEqual(len(afk), 1, f"sleep should not split AFK: {afk}")
-        self.assertLessEqual(afk[0][0], NOW + timedelta(seconds=1))
-        self.assertGreaterEqual(afk[0][1], NOW + timedelta(seconds=800))
+        self.assert_one_sleep_event(bucket, start=200, end=805)
+        self.assert_afk_contiguous(bucket, start=0, end=810)
 
     def test_jitter_below_threshold_is_not_a_gap(self):
         # A 5s delay on one poll is below 3 * POLL_TIME of extra time: no gap.
@@ -192,6 +219,7 @@ class SleepGapTests(unittest.TestCase):
             [c.args[0] for c in without],
         )
         self.assertEqual(len(with_jitter), len(without))
+        self.assertEqual(replay(with_jitter).sleep_events(), [])
 
 
 class WindowsClockSleepTests(SleepGapTests):

@@ -59,8 +59,16 @@ class AFKWatcher:
         # Store initial parent PID for orphan detection
         self._initial_ppid = os.getppid()
 
-    def ping(self, afk: bool, timestamp: datetime, duration: float = 0):
+    def ping(
+        self,
+        afk: bool,
+        timestamp: datetime,
+        duration: float = 0,
+        reason: Optional[str] = None,
+    ):
         data = {"status": "afk" if afk else "not-afk"}
+        if reason is not None:
+            data["reason"] = reason
         e = Event(timestamp=timestamp, duration=duration, data=data)
         pulsetime = self.settings.timeout + self.settings.poll_time
         self.client.heartbeat(self.bucketname, e, pulsetime=pulsetime, queued=True)
@@ -125,19 +133,23 @@ class AFKWatcher:
                         f"Pause of {(now - gap_start).total_seconds():.0f}s detected "
                         f"(from {gap_start.isoformat()})"
                     )
-                    # Close the not-afk period at the last sample and open AFK from
-                    # there, the same way "Became AFK" does. If already AFK, the
-                    # AFK event simply stretches across the gap (see below).
+                    # The pause is its own AFK event tagged reason=sleep. Close
+                    # the not-afk period at the last sample first, if there is one.
+                    # The previous AFK event already ends at gap_start + 1ms, so
+                    # the tagged event starts right after it and never overlaps.
                     if not afk:
                         self.ping(afk, timestamp=gap_start)
-                        afk = True
-                        afk_start = gap_start
-                        not_afk_start = None
-                        self.ping(
-                            afk,
-                            timestamp=gap_start + td1ms,
-                            duration=(now - gap_start).total_seconds(),
-                        )
+                    self.ping(
+                        True,
+                        timestamp=gap_start + td1ms,
+                        duration=(now - gap_start).total_seconds(),
+                        reason="sleep",
+                    )
+                    afk = True
+                    # Later AFK heartbeats are plain. Starting them at `now`
+                    # keeps them out of the tagged event (its data differs).
+                    afk_start = now
+                    not_afk_start = None
                 last_input = now - timedelta(seconds=seconds_since_input)
                 # An event starting before the not-afk event it follows cannot
                 # merge into it and is stored separately (see aw-watcher-afk#61).
